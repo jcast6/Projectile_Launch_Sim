@@ -3,199 +3,191 @@ from dash import dcc, html, dash_table
 from dash.dependencies import Input, Output, State
 import numpy as np
 import plotly.graph_objects as go
-from itertools import zip_longest
+from dash.exceptions import PreventUpdate
 
-def projectile_motion(v0, theta, mass, dt, include_drag=True):
-    theta_rad = np.radians(theta)
-    g = 9.81  # acceleration due to gravity
-    rho = 1.225 if include_drag else 0  # air density
-    A = 0.045 if include_drag else 0  # cross-sectional area
-    C_d = 0.47 if include_drag else 0  # drag coefficient
-    vx = v0 * np.cos(theta_rad)
-    vy = v0 * np.sin(theta_rad)
-    x = 0
-    y = 0
+# Function to calculate air viscosity based on temperature (Sutherland's formula)
+def air_viscosity(T):
+    T0 = 273.15  # Reference temperature (Kelvin)
+    mu0 = 1.716e-5  # Reference dynamic viscosity (kg/m·s at 273.15 K)
+    C = 111  # Sutherland's constant (Kelvin)
+    return mu0 * ((T0 + C) / (T + C)) * ((T / T0) ** 1.5)
+
+# Simulation of projectile motion considering air resistance
+def projectile_motion(v0, theta, mass, dt, drag_coefficient, include_drag=True, T=293.15, diameter=0.1):
+    theta_rad = np.radians(theta)  # Convert angle to radians
+    g = 9.81  # Acceleration due to gravity (m/s^2)
+    rho = 1.225 if include_drag else 0  # Air density (kg/m^3)
+    A = np.pi * (diameter / 2) ** 2 if include_drag else 0  # Cross-sectional area of the projectile
+    vx = v0 * np.cos(theta_rad)  # Initial horizontal velocity
+    vy = v0 * np.sin(theta_rad)  # Initial vertical velocity
+    x = 0  # Initial horizontal position
+    y = 0  # Initial vertical position
 
     while True:
-        next_x = x + vx * dt
-        next_y = y + vy * dt
+        next_x = x + vx * dt  # Calculate next horizontal position
+        next_y = y + vy * dt  # Calculate next vertical position
 
-        # Check if the projectile hits the ground on the next step
-        if next_y < 0:
-            # Interpolate to find the exact point where y crosses zero
-            t = -y / vy  # time to reach y=0
-            x += vx * t
-            y = 0  # set y exactly to zero
-            yield x, y  # yield the final point where y is exactly zero
-            break  # exit after reaching the ground
+        if next_y < 0:  # Check if projectile hits the ground
+            t = -y / vy  # Time to reach y=0, assuming vy != 0
+            x += vx * t  # Adjust x to the impact point
+            y = 0  # Projectile hits the ground
+            yield x, y
+            break
 
-        # Continue with the motion update
-        yield x, y
-        x, y = next_x, next_y
+        x, y = next_x, next_y  # Update position
 
-        # Update velocities considering drag
         if include_drag and y > 0:
-            v = np.sqrt(vx**2 + vy**2)
-            drag_force = 0.5 * rho * A * C_d * v**2
-            acceleration_drag = drag_force / mass
-            vx -= (acceleration_drag / v) * vx * dt
-            vy -= (g + (acceleration_drag / v) * vy) * dt
+            v = np.sqrt(vx**2 + vy**2)  # Speed of the projectile
+            drag_force = 0.5 * rho * A * drag_coefficient * v**2  # Drag force calculation
+            acceleration_drag = drag_force / mass  # Acceleration due to drag
+            vx -= (acceleration_drag / v) * vx * dt  # Update horizontal velocity
+            vy -= (g + (acceleration_drag / v) * vy) * dt  # Update vertical velocity
         else:
-            vy -= g * dt
+            vy -= g * dt  # Only gravity affects vertical velocity when no drag
+
+        yield x, y
+
 app = dash.Dash(__name__)
 
-# Global variables to store trajectory data and generators
 trajectory_data_p1 = []
-trajectory_data_p2 = []
 projectile_generator_p1 = None
-projectile_generator_p2 = None
 
 app.layout = html.Div([
     html.Div([
-        # Input controls for Projectile 1
         html.Div([
-            html.Label("Initial Velocity (m/s) P1:"),
-            dcc.Input(id='velocity-input-p1', type='number', value=60, style={'margin': '10px'}),
-            html.Label("Launch Angle (degrees) P1:"),
-            dcc.Input(id='angle-input-p1', type='number', value=20, style={'margin': '10px'}),
-            html.Label("Mass of the Projectile (kg) P1:"),
-            dcc.Input(id='mass-input-p1', type='number', value=1, style={'margin': '10px'}),
-            html.Label("Time Step (seconds) P1:"),
-            dcc.Input(id='time-step-input-p1', type='number', value=0.01, style={'margin': '10px'}),
-            html.Label("Include Air Resistance P1:"),
-            dcc.Dropdown(id='drag-input-p1', options=[
-                {'label': 'Yes', 'value': 'yes'}, {'label': 'No', 'value': 'no'}
-            ], value='yes', style={'width': '100px', 'margin': '10px'}),
-        ], style={'width': '48%', 'display': 'inline-block'}),
+            html.Div([
+                html.Label("Initial Velocity (m/s): ", style={'marginRight': '10px'}),
+                dcc.Input(id='velocity-input', type='number', value=60)
+            ], style={'display': 'flex', 'alignItems': 'center'}),
 
-        # Input controls for Projectile 2
-        html.Div([
-            html.Label("Initial Velocity (m/s) P2:"),
-            dcc.Input(id='velocity-input-p2', type='number', value=60, style={'margin': '10px'}),
-            html.Label("Launch Angle (degrees) P2:"),
-            dcc.Input(id='angle-input-p2', type='number', value=20, style={'margin': '10px'}),
-            html.Label("Mass of the Projectile (kg) P2:"),
-            dcc.Input(id='mass-input-p2', type='number', value=1, style={'margin': '10px'}),
-            html.Label("Time Step (seconds) P2:"),
-            dcc.Input(id='time-step-input-p2', type='number', value=0.01, style={'margin': '10px'}),
-            html.Label("Include Air Resistance P2:"),
-            dcc.Dropdown(id='drag-input-p2', options=[
-                {'label': 'Yes', 'value': 'yes'}, {'label': 'No', 'value': 'no'}
-            ], value='yes', style={'width': '100px', 'margin': '10px'}),
-        ], style={'width': '48%', 'display': 'inline-block'}),
-    ]),
-    html.Button('Run Simulation', id='run-button', n_clicks=0, style={'margin': '10px'}),
-    html.Button('Reset Simulation', id='reset-button', n_clicks=0, style={'margin': '10px'}),
-    html.Div([
-        # Plots for each projectile
-        dcc.Graph(id='trajectory-plot-p1'),
-        dcc.Graph(id='trajectory-plot-p2'),
-    ], style={'display': 'flex'}),
-    dcc.Interval(id='interval-component', interval=100, n_intervals=0, disabled=True),
+            html.Div([
+                html.Label("Launch Angle (degrees): ", style={'marginRight': '10px'}),
+                dcc.Input(id='angle-input', type='number', value=20)
+            ], style={'display': 'flex', 'alignItems': 'center'}),
 
-        html.Div([
-            dash_table.DataTable(
-                id='trajectory-table',
-                columns=[
-                    {"name": "Time Step", "id": "time_step"},
-                    {"name": "X P1", "id": "x_p1"},
-                    {"name": "Y P1", "id": "y_p1"},
-                    {"name": "X P2", "id": "x_p2"},
-                    {"name": "Y P2", "id": "y_p2"}
-                ],
-                data=[],
-                style_table={'height': '300px', 'overflowY': 'auto'}
-            )
-        ], style={'width': '100%', 'display': 'inline-block'})
+            html.Div([
+                html.Label("Mass of the Projectile (kg): ", style={'marginRight': '10px'}),
+                dcc.Input(id='mass-input', type='number', value=1)
+            ], style={'display': 'flex', 'alignItems': 'center'}),
+
+            html.Div([
+                html.Label("Time Step (seconds): ", style={'marginRight': '10px'}),
+                dcc.Input(id='time-step-input', type='number', value=0.01)
+            ], style={'display': 'flex', 'alignItems': 'center'}),
+
+            html.Div([
+                html.Label("Drag Coefficient: ", style={'marginRight': '10px'}),
+                dcc.Input(id='drag-coefficient-input', type='number', value=0.47, step=0.01)
+            ], style={'display': 'flex', 'alignItems': 'center'}),
+
+            html.Div([
+                html.Label("Include Air Resistance: ", style={'marginRight': '10px'}),
+                dcc.Dropdown(
+                    id='drag-input',
+                    options=[
+                        {'label': 'Yes', 'value': 'yes'},
+                        {'label': 'No', 'value': 'no'}
+                    ],
+                    value='yes'
+                )
+            ], style={'display': 'flex', 'alignItems': 'center'})
+        ], style={'display': 'grid', 'grid-template-columns': '1fr 1fr', 'gap': '10px', 'maxWidth': '500px'}),
+    ], style={'padding': '20px'}),
+
+    html.Button(
+        'Run Simulation', 
+        style={
+            'marginRight': '10px', 
+            'color': '#fff', 
+            'backgroundColor': '#007BFF', 
+            'border': 'none',
+            'borderRadius': '5px',
+            'padding': '10px 20px',
+            'fontSize': '16px',
+            'fontWeight': 'bold',
+            'boxShadow': '2px 2px 10px rgba(0,0,0,0.1)'
+        }, 
+        id='run-button', 
+        n_clicks=0
+    ),
+    html.Button(
+        'Reset Simulation', 
+        style={
+            'color': '#fff', 
+            'backgroundColor': '#6c757d', 
+            'border': 'none',
+            'borderRadius': '5px',
+            'padding': '10px 20px',
+            'fontSize': '16px',
+            'fontWeight': 'bold',
+            'boxShadow': '2px 2px 10px rgba(0,0,0,0.1)'
+        }, 
+        id='reset-button', 
+        n_clicks=0
+    ),
+    dcc.Graph(id='trajectory-plot'),
+    dash_table.DataTable(
+        id='trajectory-table',
+        columns=[
+            {"name": "Time Step", "id": "time_step", 'type': 'numeric', 'format': {'specifier': '.3f'}},
+            {"name": "X Position", "id": "x", 'type': 'numeric', 'format': {'specifier': '.3f'}},
+            {"name": "Y Position", "id": "y", 'type': 'numeric', 'format': {'specifier': '.3f'}}
+        ],
+        data=[],
+        style_cell={'textAlign': 'left', 'minWidth': '100px', 'width': '120px', 'maxWidth': '140px'},
+        style_table={'height' : '155px', 'width': '50%', 'overflowY' : 'scroll'},
+        style_header={'backgroundColor': 'white', 'fontWeight': 'bold'}
+    ),
+    dcc.Interval(id='interval-component', interval=100, n_intervals=0, disabled=True)
 ])
+
+
 @app.callback(
-    [Output('trajectory-plot-p1', 'figure'),
-     Output('trajectory-plot-p2', 'figure'),
-     Output('trajectory-table', 'data'), 
+    [Output('trajectory-plot', 'figure'),
+     Output('trajectory-table', 'data'),
      Output('interval-component', 'disabled')],
     [Input('interval-component', 'n_intervals'),
      Input('run-button', 'n_clicks'),
      Input('reset-button', 'n_clicks')],
-    [State('velocity-input-p1', 'value'),
-     State('angle-input-p1', 'value'),
-     State('mass-input-p1', 'value'),
-     State('time-step-input-p1', 'value'),
-     State('drag-input-p1', 'value'),
-     State('velocity-input-p2', 'value'),
-     State('angle-input-p2', 'value'),
-     State('mass-input-p2', 'value'),
-     State('time-step-input-p2', 'value'),
-     State('drag-input-p2', 'value')]
+    [State('velocity-input', 'value'),
+     State('angle-input', 'value'),
+     State('mass-input', 'value'),
+     State('time-step-input', 'value'),
+     State('drag-coefficient-input', 'value'),
+     State('drag-input', 'value')]
 )
-def update_simulation(n_intervals, run_clicks, reset_clicks, v0_p1, theta_p1, mass_p1, dt_p1, drag_p1, v0_p2, theta_p2, mass_p2, dt_p2, drag_p2):
-    global projectile_generator_p1, projectile_generator_p2, trajectory_data_p1, trajectory_data_p2
+def update_simulation(n_intervals, run_clicks, reset_clicks, v0, theta, mass, dt, drag_coefficient, drag):
+    global projectile_generator_p1, trajectory_data_p1
+
     ctx = dash.callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
     triggered_id = ctx.triggered[0]['prop_id'].split('.')[0]
 
-    if triggered_id == 'run-button':
-        include_drag_p1 = drag_p1 == 'yes'
-        projectile_generator_p1 = projectile_motion(v0_p1, theta_p1, mass_p1, dt_p1, include_drag_p1)
-        include_drag_p2 = drag_p2 == 'yes'
-        projectile_generator_p2 = projectile_motion(v0_p2, theta_p2, mass_p2, dt_p2, include_drag_p2)
+    if triggered_id == 'run-button' and ctx.triggered[0]['value']:
+        include_drag = drag == 'yes'
+        projectile_generator_p1 = projectile_motion(v0, theta, mass, dt, drag_coefficient, include_drag)
+        return go.Figure(), [], False  # Start the interval and initiate plotting
 
-    elif triggered_id == 'reset-button':
-        trajectory_data_p1 = []
-        trajectory_data_p2 = []
+    if triggered_id == 'reset-button' and ctx.triggered[0]['value']:
         projectile_generator_p1 = None
-        projectile_generator_p2 = None
-        return go.Figure(), go.Figure(), [], True
-
-    finished1 = finished2 = True
+        trajectory_data_p1 = []  # Clear the data for projectile 1
+        return go.Figure(), [], True  # Reset the plot and disable the interval
 
     if projectile_generator_p1 is not None:
         try:
             x_p1, y_p1 = next(projectile_generator_p1)
-            trajectory_data_p1.append((x_p1, y_p1))
-            finished1 = False
+            trajectory_data_p1.append({'time_step': n_intervals * dt, 'x': x_p1, 'y': y_p1})
+            fig = go.Figure(data=[
+                go.Scatter(x=[point['x'] for point in trajectory_data_p1], y=[point['y'] for point in trajectory_data_p1], mode='lines+markers', name='Trajectory')
+            ])
+            fig.update_layout(title="Projectile Trajectory", xaxis_title="Distance (m)", yaxis_title="Height (m)")
+            return fig, trajectory_data_p1, False  # Keep the interval active
         except StopIteration:
-            projectile_generator_p1 = None
-            finished1 = True
+            return dash.no_update, trajectory_data_p1, True  # Disable further updates without clearing the plot
 
-    if projectile_generator_p2 is not None:
-        try:
-            x_p2, y_p2 = next(projectile_generator_p2)
-            trajectory_data_p2.append((x_p2, y_p2))
-            finished2 = False
-        except StopIteration:
-            projectile_generator_p2 = None
-            finished2 = True
+    raise PreventUpdate
 
-    data_table = [
-        {
-            "time_step": i,
-            "x_p1": f"{point[0]:.3f}" if i < len(trajectory_data_p1) else "",
-            "y_p1": f"{point[1]:.3f}" if i < len(trajectory_data_p1) else "",
-            "x_p2": f"{point2[0]:.3f}" if i < len(trajectory_data_p2) else "",
-            "y_p2": f"{point2[1]:.3f}" if i < len(trajectory_data_p2) else ""
-        }
-        for i, (point, point2) in enumerate(zip_longest(trajectory_data_p1, trajectory_data_p2, fillvalue=(None, None)))
-    ]
-
-    def update_figure(data, title, line_color):
-        fig = go.Figure(data=[
-            go.Scatter(
-                x=[point[0] for point in data], 
-                y=[point[1] for point in data], 
-                mode='lines+markers', 
-                name='Trajectory',
-                line=dict(color=line_color)
-            )
-        ])
-        fig.update_layout(title=title, xaxis_title="Distance (m)", yaxis_title="Height (m)")
-        return fig
-    
-
-    fig1 = update_figure(trajectory_data_p1, "Projectile 1 Plot", 'blue')
-    fig2 = update_figure(trajectory_data_p2, "Projectile 2 Plot", 'red')
-
-    all_finished = finished1 and finished2
-    return fig1, fig2, data_table, all_finished
 
 if __name__ == '__main__':
     app.run_server(debug=True)
-
